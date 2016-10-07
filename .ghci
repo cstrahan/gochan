@@ -1,0 +1,5 @@
+:set -fwarn-unused-binds -fwarn-unused-imports
+:set -isrc 
+:set -ifuzz
+:load Control.Concurrent.BoundedChan
+:load Main
