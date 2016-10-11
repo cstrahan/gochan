@@ -17,7 +17,7 @@ let
     vector
 
     hspec
-    bench
+    criterion
     weigh
   ]);
 
