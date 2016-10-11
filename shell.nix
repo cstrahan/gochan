@@ -28,6 +28,7 @@ with pkgs;
 runCommand "dummy" {
   buildInputs = [
     ghcPackages
+    pkgs.go_1_7
   ];
   shellHook = ''
     export NIX_GHC="${ghcPackages}/bin/ghc"
