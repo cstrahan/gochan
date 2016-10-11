@@ -24,6 +24,8 @@ main =
                   , bench "select send/recv with 3 case" $
                     whnfIO (select3 size)])
 
+iters = 20
+
 sendRecv :: Int -> IO ()
 sendRecv size = do
     c <- mkChan size
@@ -32,7 +34,6 @@ sendRecv size = do
            closeChan c
     drain c
   where
-    iters = 20
     drain ch = do
         mn <- chanRecv ch
         case mn of
@@ -50,7 +51,6 @@ select1 size = do
     forkIO $ ping c1 0
     pong c1 0
   where
-    iters = 20
     ping c1 n = do
         if (n < iters)
             then do
@@ -72,7 +72,6 @@ select2 size = do
     forkIO $ ping c1 c2 0
     pong c1 c2 0
   where
-    iters = 20
     ping :: Chan Int -> Chan Int -> Int -> IO ()
     ping c1 c2 n = do
         if (n < iters)
@@ -103,7 +102,6 @@ select3 size = do
     forkIO $ ping c1 c2 c3 0
     pong c1 c2 c3 0
   where
-    iters = 20
     ping c1 c2 c3 n = do
         if (n < iters)
             then do

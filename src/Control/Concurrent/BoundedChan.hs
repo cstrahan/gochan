@@ -28,21 +28,21 @@ import           Unsafe.Coerce
 
 -- TODO: need uique ID number
 data Chan a = Chan
-    { _qcount :: !(IORef Int)
-    , _qsize  :: !Int
-    , _buf    :: !(IOArray Int a)
-    , _sendx  :: !(IORef Int)
-    , _recvx  :: !(IORef Int)
-    , _sendq  :: !(WaitQ)
-    , _recvq  :: !(WaitQ)
-    , _lock   :: !(MVar ())
-    , _closed :: !(IORef Bool)
-    , _id     :: !Word64
+    { _qcount :: {-# UNPACK #-} !(IORef Int)
+    , _qsize  :: {-# UNPACK #-} !Int
+    , _buf    :: {-# UNPACK #-} !(IOArray Int a)
+    , _sendx  :: {-# UNPACK #-} !(IORef Int)
+    , _recvx  :: {-# UNPACK #-} !(IORef Int)
+    , _sendq  :: {-# UNPACK #-} !WaitQ
+    , _recvq  :: {-# UNPACK #-} !WaitQ
+    , _lock   :: {-# UNPACK #-} !(MVar ())
+    , _closed :: {-# UNPACK #-} !(IORef Bool)
+    , _id     :: {-# UNPACK #-} !Word64
     }
 
 data WaitQ = WaitQ
-    { _first :: !(IORef (Maybe SomeSleeper))
-    , _last  :: !(IORef (Maybe SomeSleeper))
+    { _first :: {-# UNPACK #-} !(IORef (Maybe SomeSleeper))
+    , _last  :: {-# UNPACK #-} !(IORef (Maybe SomeSleeper))
     }
 
 data SomeSleeper =
@@ -66,26 +66,32 @@ data Case a
                      !b
                      !(IO a)
 
+{-# INLINE caseChanId #-}
+
 caseChanId :: Case a -> Word64
 caseChanId (Recv chan _)   = _id chan
 caseChanId (Send chan _ _) = _id chan
+
+{-# INLINE caseWithChan #-}
 
 caseWithChan :: Case a -> (forall b. Chan b -> c) -> c
 caseWithChan (Recv chan _) f   = f chan
 caseWithChan (Send chan _ _) f = f chan
 
 {-# NOINLINE currIdRef #-}
+
 currIdRef :: IORef Word64
 currIdRef = unsafePerformIO (newIORef 0)
 
 {-# NOINLINE currSIdRef #-}
+
 currSIdRef :: IORef Word64
 currSIdRef = unsafePerformIO (newIORef 0)
 
 shuffleVector
     :: (VGM.MVector v e)
     => v RealWorld e -> IO ()
-shuffleVector xs = do
+shuffleVector !xs = do
     let size = VGM.length xs
     forM_ [1 .. size - 1] $
         \i -> do
@@ -112,12 +118,9 @@ select name cases mdefault = do
                vec
            V.unsafeFreeze vec
     selLock lockOrder
-    let
-        -- PASS 1
-        pass1 n = do
-            let cas = pollOrder VG.! n
+    let pass1 n = do
             if n /= ncases
-                then case cas of
+                then case pollOrder VG.! n of
                          Recv chan act -> do
                              ms <- dequeue (_sendq chan)
                              case ms of
@@ -131,7 +134,7 @@ select name cases mdefault = do
                                      if qcount > 0
                                          then do
                                              recvx <- readIORef (_recvx chan)
-                                             val <- readArray (_buf chan) recvx
+                                             !val <- readArray (_buf chan) recvx
                                              let recvx' =
                                                      let x = recvx + 1
                                                      in if x == _qsize chan
@@ -190,55 +193,51 @@ select name cases mdefault = do
                                  V.generateM
                                      ncases
                                      (\n -> do
-                                          let cas = lockOrder V.! n
-                                          caseWithChan
-                                              cas
-                                              (\chan -> do
-                                                   case cas of
-                                                       Send _ val _ -> do
-                                                           next <- newIORef Nothing
-                                                           prev <- newIORef Nothing
-                                                           elemRef <- newIORef (unsafeCoerce val)
-                                                           id <-
-                                                               atomicModifyIORef' -- TODO: delete once we have ptr equality
-                                                                   currSIdRef
-                                                                   (\currId ->
-                                                                         (currId + 1, currId))
-                                                           let s =
-                                                                   SomeSleeper
-                                                                       (Sleeper
-                                                                            (Just selectDone)
-                                                                            (Just (unsafeCoerceCase cas))
-                                                                            next
-                                                                            prev
-                                                                            (Just elemRef)
-                                                                            (unsafeCoerceChan chan)
-                                                                            park
-                                                                            id)
-                                                           enqueue (_sendq chan) s
-                                                           return s
-                                                       Recv _ _ -> do
-                                                           next <- newIORef Nothing
-                                                           prev <- newIORef Nothing
-                                                           elemRef <- newIORef undefined
-                                                           id <-
-                                                               atomicModifyIORef' -- TODO: delete once we have ptr equality
-                                                                   currSIdRef
-                                                                   (\currId ->
-                                                                         (currId + 1, currId))
-                                                           let s =
-                                                                   SomeSleeper
-                                                                       (Sleeper
-                                                                            (Just selectDone)
-                                                                            (Just (unsafeCoerceCase cas))
-                                                                            next
-                                                                            prev
-                                                                            (Just elemRef)
-                                                                            (unsafeCoerceChan chan)
-                                                                            park
-                                                                            id)
-                                                           enqueue (_recvq chan) s
-                                                           return s))
+                                          case lockOrder V.! n of
+                                              cas@(Send chan val _) -> do
+                                                  next <- newIORef Nothing
+                                                  prev <- newIORef Nothing
+                                                  elemRef <- newIORef (unsafeCoerce val)
+                                                  id <-
+                                                      atomicModifyIORef' -- TODO: delete once we have ptr equality
+                                                          currSIdRef
+                                                          (\currId ->
+                                                                (currId + 1, currId))
+                                                  let s =
+                                                          SomeSleeper
+                                                              (Sleeper
+                                                                   (Just selectDone)
+                                                                   (Just (unsafeCoerceCase cas))
+                                                                   next
+                                                                   prev
+                                                                   (Just elemRef)
+                                                                   (unsafeCoerceChan chan)
+                                                                   park
+                                                                   id)
+                                                  enqueue (_sendq chan) s
+                                                  return s
+                                              cas@(Recv chan _) -> do
+                                                  next <- newIORef Nothing
+                                                  prev <- newIORef Nothing
+                                                  elemRef <- newIORef undefined
+                                                  id <-
+                                                      atomicModifyIORef' -- TODO: delete once we have ptr equality
+                                                          currSIdRef
+                                                          (\currId ->
+                                                                (currId + 1, currId))
+                                                  let s =
+                                                          SomeSleeper
+                                                              (Sleeper
+                                                                   (Just selectDone)
+                                                                   (Just (unsafeCoerceCase cas))
+                                                                   next
+                                                                   prev
+                                                                   (Just elemRef)
+                                                                   (unsafeCoerceChan chan)
+                                                                   park
+                                                                   id)
+                                                  enqueue (_recvq chan) s
+                                                  return s)
                              selUnlock lockOrder
                              ms <- takeMVar park
                              selLock lockOrder
@@ -277,28 +276,42 @@ select name cases mdefault = do
                                          0
     pass1 0
 
+{-# INLINE unsafeCoerceSendAction #-}
+
 unsafeCoerceSendAction :: IO a -> IO b
 unsafeCoerceSendAction = unsafeCoerce
+
+{-# INLINE unsafeCoerceRecvAction #-}
 
 unsafeCoerceRecvAction :: (Maybe b -> IO a) -> (Maybe d -> IO c)
 unsafeCoerceRecvAction = unsafeCoerce
 
+{-# INLINE unsafeCoerceSleeper #-}
+
 unsafeCoerceSleeper :: Sleeper a -> Sleeper b
 unsafeCoerceSleeper = unsafeCoerce
+
+{-# INLINE unsafeCoerceChan #-}
 
 unsafeCoerceChan :: Chan a -> Chan b
 unsafeCoerceChan = unsafeCoerce
 
+{-# INLINE unsafeCoerceCase #-}
+
 unsafeCoerceCase :: Case a -> Case b
 unsafeCoerceCase = unsafeCoerce
 
-lockCase cas =
+{-# INLINE lockCase #-}
+
+lockCase !cas =
     caseWithChan
         cas
         (\chan ->
               takeMVar (_lock chan))
 
-unlockCase cas =
+{-# INLINE unlockCase #-}
+
+unlockCase !cas =
     caseWithChan
         cas
         (\chan ->
@@ -307,7 +320,7 @@ unlockCase cas =
 selLock
     :: (VG.Vector v e, e ~ Case a)
     => v (Case a) -> IO ()
-selLock vec = do
+selLock !vec = do
     go 0 maxBound
   where
     len = VG.length vec
@@ -323,7 +336,7 @@ selLock vec = do
 selUnlock
     :: (VG.Vector v e, e ~ Case a)
     => v (Case a) -> IO ()
-selUnlock vec = do
+selUnlock !vec = do
     go (len - 1) maxBound
   where
     len = VG.length vec
@@ -337,7 +350,7 @@ selUnlock vec = do
                 go (n - 1) (caseChanId cas)
 
 mkChan :: Int -> IO (Chan a)
-mkChan size = do
+mkChan !size = do
     ary <- newArray_ (0, size - 1)
     qcount <- newIORef 0
     sendx <- newIORef 0
@@ -368,10 +381,10 @@ mkChan size = do
         }
 
 chanSend :: Chan a -> a -> IO ()
-chanSend chan val = void $ chanSendInternal chan val True
+chanSend !chan !val = void $ chanSendInternal chan val True
 
 chanSendInternal :: Chan a -> a -> Bool -> IO Bool
-chanSendInternal chan val block = do
+chanSendInternal !chan !val !block = do
     isClosed <- readIORef (_closed chan)
     recvq_first <- readIORef (_first (_recvq chan))
     qcount <- readIORef (_qcount chan)
@@ -430,7 +443,7 @@ chanSendInternal chan val block = do
                                                  _ -> return True
 
 send :: Chan a -> Sleeper a -> a -> IO () -> IO ()
-send chan s val unlock = do
+send !chan !s !val !unlock = do
     case _elem s of
         Just elemRef -> do
             writeIORef elemRef val
@@ -440,7 +453,7 @@ send chan s val unlock = do
     putMVar (_park s) (Just s) -- unpark
 
 closeChan :: Chan a -> IO ()
-closeChan chan = do
+closeChan !chan = do
     takeMVar (_lock chan)
     isClosed <- readIORef (_closed chan)
     when isClosed $
@@ -469,7 +482,7 @@ closeChan chan = do
                   putMVar (_park s) Nothing)
 
 chanRecv :: Chan a -> IO (Maybe a)
-chanRecv chan = do
+chanRecv !chan = do
     ref <- newIORef undefined
     (selected,received) <- chanRecvInternal chan (Just ref) True
     if received
@@ -477,7 +490,7 @@ chanRecv chan = do
         else return Nothing
 
 chanRecvInternal :: Chan a -> Maybe (IORef a) -> Bool -> IO (Bool, Bool)
-chanRecvInternal chan melemRef block = do
+chanRecvInternal !chan !melemRef !block = do
     sendq_first <- readIORef (_first (_sendq chan))
     qcount <- atomicReadIORef (_qcount chan)
     isClosed <- atomicReadIORef (_closed chan)
@@ -534,7 +547,7 @@ chanRecvInternal chan melemRef block = do
                                              return (True, isJust ms')
 
 recv :: Chan a -> Sleeper a -> Maybe (IORef a) -> IO () -> IO ()
-recv chan s melemRef unlock = do
+recv !chan !s !melemRef !unlock = do
     if _qsize chan == 0
         then case melemRef of
                  Just elemRef -> do
@@ -561,7 +574,7 @@ recv chan s melemRef unlock = do
     putMVar (_park s) (Just s) -- unpark
 
 enqueue :: WaitQ -> SomeSleeper -> IO ()
-enqueue q someS@(SomeSleeper s) = do
+enqueue !q someS@(SomeSleeper s) = do
     writeIORef (_next s) Nothing
     mx <- readIORef . _last $ q
     case mx of
@@ -575,7 +588,7 @@ enqueue q someS@(SomeSleeper s) = do
             writeIORef (_last q) (Just someS)
 
 dequeue :: WaitQ -> IO (Maybe SomeSleeper)
-dequeue q = do
+dequeue !q = do
     ms <- readIORef (_first q)
     case ms of
         Nothing -> return Nothing
@@ -620,7 +633,7 @@ dequeue q = do
 {-# INLINE atomicReadIORef #-}
 
 atomicReadIORef :: IORef a -> IO a
-atomicReadIORef ref =
+atomicReadIORef !ref =
     atomicModifyIORef'
         ref
         (\oldVal ->
@@ -629,10 +642,10 @@ atomicReadIORef ref =
 -- TODO: Consider (carefully) using pointer equality.
 eqSleeper
     :: Sleeper a -> Sleeper b -> Bool
-eqSleeper s1 s2 = _sid s1 == _sid s2
+eqSleeper !s1 !s2 = _sid s1 == _sid s2
 
 dequeueSleeper :: WaitQ -> SomeSleeper -> IO ()
-dequeueSleeper q someS@(SomeSleeper s) = do
+dequeueSleeper !q someS@(SomeSleeper s) = do
     mx <- readIORef (_prev s)
     my <- readIORef (_next s)
     case mx of
