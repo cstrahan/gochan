@@ -43,6 +43,16 @@ executable bench
     hs-source-dirs: bench
     ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2
 
+executable weight
+    main-is: Main.hs
+    build-depends:
+        base >=4 && <5,
+        weigh -any,
+        bchan -any
+    default-language: Haskell98
+    hs-source-dirs: weight
+    ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2
+
 test-suite fuzz
     type: exitcode-stdio-1.0
     main-is: Main.hs
