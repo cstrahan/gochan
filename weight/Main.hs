@@ -1,7 +1,7 @@
 module Main where
 
 import           Control.Concurrent             hiding (Chan)
-import           Control.Concurrent.BoundedChan
+import           Control.Concurrent.GChan
 import           Control.Monad
 import           System.IO.Unsafe
 import           Weigh
@@ -30,8 +30,8 @@ unbufferedSendRecv c = do
 
 unselectSendRecv :: Chan Int -> IO ()
 unselectSendRecv c = do
-    forkIO $ select "ping" [Send c 0 (return ())] Nothing
-    select "pong" [Recv c (const (return ()))] Nothing
+    forkIO $ select [Send c 0 (return ())] Nothing
+    select [Recv c (const (return ()))] Nothing
     return ()
 
 simpleSend :: Chan Int -> IO ()
@@ -41,10 +41,10 @@ simpleRecv :: Chan Int -> IO ()
 simpleRecv c = void (chanRecv c)
 
 selectSend :: Chan Int -> IO ()
-selectSend c = select "ping" [Send c 0 (return ())] Nothing
+selectSend c = select [Send c 0 (return ())] Nothing
 
 selectRecv :: Chan Int -> IO ()
-selectRecv c = select "pong" [Recv c (const (return ()))] Nothing
+selectRecv c = select [Recv c (const (return ()))] Nothing
 
 --------------------------------------------------------------------------------
 -- We don't want these to show up in allocations, so carefully unsafePerformIO

@@ -1,1 +1,2 @@
 * Unboxed channels a la Data.Vector.Unboxed
+* Run through http://ghc.readthedocs.io/en/8.0.1/using-optimisation.html

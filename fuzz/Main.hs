@@ -3,7 +3,7 @@
 module Main where
 
 import           Control.Concurrent             hiding (Chan)
-import           Control.Concurrent.BoundedChan
+import           Control.Concurrent.GChan
 import           Control.Monad
 import           Data.IORef
 import           Test.Hspec
@@ -60,7 +60,7 @@ drain :: Drainer
 drain ch recvAct closeAct = do
     mn <- chanRecv ch
     case mn of
-        Just n -> do
+        Msg n -> do
             recvAct n
             drain ch recvAct closeAct
         _ -> closeAct
@@ -68,11 +68,10 @@ drain ch recvAct closeAct = do
 drainSelect :: Drainer
 drainSelect ch recvAct closeAct = do
     select
-        "test"
         [ Recv
               ch
               (\case
-                   Just n -> do
+                   Msg n -> do
                        recvAct n
                        drainSelect ch recvAct closeAct
                    _ -> closeAct)]
@@ -85,7 +84,7 @@ sendN ch low hi = do
 
 sendNSelect :: Sender
 sendNSelect ch low hi = do
-    select "test" [Send ch low (return ())] Nothing
+    select [Send ch low (return ())] Nothing
     when (low < hi) (sendNSelect ch (low + 1) hi)
 
 sendRecv :: Int -> Int -> Int -> Sender -> Drainer -> Expectation
@@ -120,8 +119,8 @@ multiTest size = do
     c1recvdRef <- newIORef 0
     c2sentRef <- newIORef 0
     c2recvdRef <- newIORef 0
-    forkIO $ ping2 "ping" c1sentRef c2sentRef c1 c2 0 (putMVar lock2 ())
-    pong2 "pong" c1recvdRef c2recvdRef c1 c2 0 (putMVar lock1 ())
+    forkIO $ ping2 c1sentRef c2sentRef c1 c2 0 (putMVar lock2 ())
+    pong2 c1recvdRef c2recvdRef c1 c2 0 (putMVar lock1 ())
     takeMVar lock1
     takeMVar lock2
     c1sent <- readIORef c1sentRef
@@ -133,47 +132,43 @@ multiTest size = do
         (c1recvd, c2recvd)
 
 ping2
-    :: String
-    -> IORef Int
+    :: IORef Int
     -> IORef Int
     -> Chan Int
     -> Chan Int
     -> Int
     -> IO ()
     -> IO ()
-ping2 name ref1 ref2 c1 c2 n doneAct = do
+ping2 ref1 ref2 c1 c2 n doneAct = do
     if (n < 20)
         then do
             select
-                "ping"
                 [ Send c1 n (void (modifyIORef' ref1 (+ 1)))
                 , Send c2 n (void (modifyIORef' ref2 (+ 1)))]
                 Nothing
-            ping2 name ref1 ref2 c1 c2 (n + 1) doneAct
+            ping2 ref1 ref2 c1 c2 (n + 1) doneAct
         else doneAct
 
 pong2
-    :: String
-    -> IORef Int
+    :: IORef Int
     -> IORef Int
     -> Chan Int
     -> Chan Int
     -> Int
     -> IO ()
     -> IO ()
-pong2 name ref1 ref2 c1 c2 n doneAct = do
+pong2 ref1 ref2 c1 c2 n doneAct = do
     if (n < 20)
         then do
             select
-                "pong"
                 [ Recv
                       c1
                       (\case
-                           Just n -> modifyIORef' ref1 (+ 1))
+                           Msg n -> modifyIORef' ref1 (+ 1))
                 , Recv
                       c2
                       (\case
-                           Just n -> modifyIORef' ref2 (+ 1))]
+                           Msg n -> modifyIORef' ref2 (+ 1))]
                 Nothing
-            pong2 name ref1 ref2 c1 c2 (n + 1) doneAct
+            pong2 ref1 ref2 c1 c2 (n + 1) doneAct
         else doneAct

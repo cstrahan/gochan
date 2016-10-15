@@ -1,5 +1,5 @@
 :set -fwarn-unused-binds -fwarn-unused-imports
 :set -isrc 
-:set -iweight
+:set -idemo
 :load Control.Concurrent.BoundedChan
 :load Main

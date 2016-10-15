@@ -2,6 +2,7 @@ let
   pkgs = import <nixpkgs> { };
 
   ghcPackages = pkgs.haskellPackages.ghcWithHoogle (p: with p; [
+    ghc-gc-tune
     cabal-install
     hindent
     ghc-mod
@@ -29,6 +30,7 @@ runCommand "dummy" {
   buildInputs = [
     ghcPackages
     pkgs.go_1_7
+    gnuplot
   ];
   shellHook = ''
     export NIX_GHC="${ghcPackages}/bin/ghc"

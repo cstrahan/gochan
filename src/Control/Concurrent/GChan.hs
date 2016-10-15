@@ -1,14 +1,16 @@
+-- {-# OPTIONS_GHC  #-}
+-- -fexpose-all-unfoldings
 {-# LANGUAGE BangPatterns              #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE LambdaCase                #-}
 {-# LANGUAGE MultiParamTypeClasses     #-}
 {-# LANGUAGE Rank2Types                #-}
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeFamilies              #-}
 
-module Control.Concurrent.BoundedChan where
+module Control.Concurrent.GChan where
 
 import           Control.Concurrent.MVar
-import           Control.Exception.Base      (evaluate)
 import           Control.Monad
 import           Control.Monad.Primitive     (RealWorld)
 import           Data.Array.IO
@@ -26,7 +28,6 @@ import           System.IO.Unsafe
 import           System.Random
 import           Unsafe.Coerce
 
--- TODO: need uique ID number
 data Chan a = Chan
     { _qcount :: {-# UNPACK #-} !(IORef Int)
     , _qsize  :: {-# UNPACK #-} !Int
@@ -59,9 +60,13 @@ data Sleeper a = forall b. Sleeper
     , _sid        :: !Word64
     }
 
+data Result a
+    = Msg a
+    | Closed
+
 data Case a
     = forall b. Recv !(Chan b)
-                     !(Maybe b -> IO a)
+                     !(Result b -> IO a)
     | forall b. Send !(Chan b)
                      !b
                      !(IO a)
@@ -71,12 +76,6 @@ data Case a
 caseChanId :: Case a -> Word64
 caseChanId (Recv chan _)   = _id chan
 caseChanId (Send chan _ _) = _id chan
-
-{-# INLINE caseWithChan #-}
-
-caseWithChan :: Case a -> (forall b. Chan b -> c) -> c
-caseWithChan (Recv chan _) f   = f chan
-caseWithChan (Send chan _ _) f = f chan
 
 {-# NOINLINE currIdRef #-}
 
@@ -92,7 +91,7 @@ shuffleVector
     :: (VGM.MVector v e)
     => v RealWorld e -> IO ()
 shuffleVector !xs = do
-    let size = VGM.length xs
+    let !size = VGM.length xs
     forM_ [1 .. size - 1] $
         \i -> do
             j <- randomRIO (0, i)
@@ -103,14 +102,18 @@ shuffleVector !xs = do
 
 select
     :: forall a.
-       String -> [Case a] -> Maybe (IO a) -> IO a
-select name cases mdefault = do
-    pollOrder <-
-        do vec <- V.unsafeThaw (V.fromList cases)
+       [Case a] -> Maybe (IO a) -> IO a
+select cases mdefault = do
+    -- randomize the poll order to enforce fairness.
+    !pollOrder <-
+        -- for reasons unknown to me, we get better performance when we don't
+        -- explicitly lift out the common fromList expression.
+        do vec <- V.thaw (V.fromList cases)
            shuffleVector vec
            V.unsafeFreeze vec
-    let ncases = VG.length pollOrder
-    lockOrder <-
+    let !ncases = VG.length pollOrder
+    -- we need to aquire locks in a consistent order so we don't deadlock.
+    !lockOrder <-
         do vec <- V.thaw (V.fromList cases)
            VAH.sortBy
                (\cas1 cas2 ->
@@ -118,7 +121,8 @@ select name cases mdefault = do
                vec
            V.unsafeFreeze vec
     selLock lockOrder
-    let pass1 n = do
+    -- PASS 1 - attempt to dequeue a Suspend from one of the channels.
+    let pass1 !n = do
             if n /= ncases
                 then case pollOrder VG.! n of
                          Recv chan act -> do
@@ -128,32 +132,32 @@ select name cases mdefault = do
                                      elemRef <- newIORef undefined
                                      recv chan (unsafeCoerceSleeper s) (Just elemRef) (selUnlock lockOrder)
                                      val <- readIORef elemRef
-                                     act (Just val)
+                                     act (Msg val)
                                  _ -> do
-                                     qcount <- readIORef (_qcount chan)
+                                     !qcount <- readIORef (_qcount chan)
                                      if qcount > 0
                                          then do
-                                             recvx <- readIORef (_recvx chan)
-                                             !val <- readArray (_buf chan) recvx
-                                             let recvx' =
-                                                     let x = recvx + 1
+                                             !recvx <- readIORef (_recvx chan)
+                                             val <- readArray (_buf chan) recvx
+                                             let !recvx' =
+                                                     let !x = recvx + 1
                                                      in if x == _qsize chan
                                                             then 0
                                                             else x
                                              writeIORef (_recvx chan) $! recvx'
                                              writeIORef (_qcount chan) (qcount - 1)
                                              selUnlock lockOrder
-                                             act (Just val)
+                                             act (Msg val)
                                          else do
-                                             isClosed <- readIORef (_closed chan)
+                                             !isClosed <- readIORef (_closed chan)
                                              if isClosed
                                                  then do
                                                      selUnlock lockOrder
-                                                     act Nothing
+                                                     act Closed
                                                  else do
                                                      pass1 (n + 1)
                          Send chan val act -> do
-                             isClosed <- readIORef (_closed chan)
+                             !isClosed <- readIORef (_closed chan)
                              if isClosed
                                  then do
                                      selUnlock lockOrder
@@ -165,13 +169,13 @@ select name cases mdefault = do
                                              send chan (unsafeCoerceSleeper s) val (selUnlock lockOrder)
                                              act
                                          _ -> do
-                                             qcount <- readIORef (_qcount chan)
+                                             !qcount <- readIORef (_qcount chan)
                                              if qcount < _qsize chan
                                                  then do
-                                                     sendx <- readIORef (_sendx chan)
+                                                     !sendx <- readIORef (_sendx chan)
                                                      writeArray (_buf chan) sendx val
                                                      let !sendx' =
-                                                             let x = sendx + 1
+                                                             let !x = sendx + 1
                                                              in if x == _qsize chan
                                                                     then 0
                                                                     else x
@@ -186,24 +190,30 @@ select name cases mdefault = do
                              selUnlock lockOrder
                              def
                          _ -> do
-                             -- PASS 2
+                             -- PASS 2 - enqueue a Suspend for each case.
+                             --
+                             -- the shared 'park' MVark is used wake up this
+                             -- thread.
                              park <- newEmptyMVar
+                             -- the shared 'selectDone' IORef allows the other
+                             -- threads to know who won the race to wake us up
+                             -- (via CAS).
                              selectDone <- newIORef False
                              ss <-
                                  V.generateM
                                      ncases
                                      (\n -> do
+                                          next <- newIORef Nothing
+                                          prev <- newIORef Nothing
+                                          id <-
+                                              atomicModifyIORef'
+                                                  currSIdRef
+                                                  (\currId ->
+                                                        (currId + 1, currId))
                                           case lockOrder V.! n of
                                               cas@(Send chan val _) -> do
-                                                  next <- newIORef Nothing
-                                                  prev <- newIORef Nothing
                                                   elemRef <- newIORef (unsafeCoerce val)
-                                                  id <-
-                                                      atomicModifyIORef' -- TODO: delete once we have ptr equality
-                                                          currSIdRef
-                                                          (\currId ->
-                                                                (currId + 1, currId))
-                                                  let s =
+                                                  let !s =
                                                           SomeSleeper
                                                               (Sleeper
                                                                    (Just selectDone)
@@ -217,15 +227,8 @@ select name cases mdefault = do
                                                   enqueue (_sendq chan) s
                                                   return s
                                               cas@(Recv chan _) -> do
-                                                  next <- newIORef Nothing
-                                                  prev <- newIORef Nothing
                                                   elemRef <- newIORef undefined
-                                                  id <-
-                                                      atomicModifyIORef' -- TODO: delete once we have ptr equality
-                                                          currSIdRef
-                                                          (\currId ->
-                                                                (currId + 1, currId))
-                                                  let s =
+                                                  let !s =
                                                           SomeSleeper
                                                               (Sleeper
                                                                    (Just selectDone)
@@ -241,10 +244,11 @@ select name cases mdefault = do
                              selUnlock lockOrder
                              ms <- takeMVar park
                              selLock lockOrder
-                             let pass3 n = do
+                             -- PASS 3 - dequeue each Suspend we enqueued
+                             -- earlier.
+                             let pass3 !n = do
                                      case ss VG.! n of
                                          someS@(SomeSleeper s) ->
-                                             --case _case s of
                                              case s of
                                                  (Sleeper _ cas _ _ _ _ _ _) ->
                                                      case cas of
@@ -259,7 +263,6 @@ select name cases mdefault = do
                              pass3 0
                              case ms of
                                  Just s -> do
-                                     --case (_case s) of
                                      case s of
                                          (Sleeper _ cas _ _ _ _ _ _) ->
                                              case cas of
@@ -267,13 +270,13 @@ select name cases mdefault = do
                                                      selUnlock lockOrder
                                                      unsafeCoerceSendAction act
                                                  Just (Recv chan act) -> do
-                                                     val <- readIORef (fromJust (_elem s))
+                                                     !val <- readIORef (fromJust (_elem s))
                                                      selUnlock lockOrder
-                                                     unsafeCoerceRecvAction act (Just val) -- XXXXX val is nothing?!?!?!
+                                                     unsafeCoerceRecvAction act (Msg val)
                                  _ -> do
-                                     -- channel closed, restart loop
-                                     pass1
-                                         0
+                                     -- channel closed, restart loop to figure
+                                     -- out which one.
+                                     pass1 0
     pass1 0
 
 {-# INLINE unsafeCoerceSendAction #-}
@@ -283,7 +286,7 @@ unsafeCoerceSendAction = unsafeCoerce
 
 {-# INLINE unsafeCoerceRecvAction #-}
 
-unsafeCoerceRecvAction :: (Maybe b -> IO a) -> (Maybe d -> IO c)
+unsafeCoerceRecvAction :: (Result b -> IO a) -> (Result d -> IO c)
 unsafeCoerceRecvAction = unsafeCoerce
 
 {-# INLINE unsafeCoerceSleeper #-}
@@ -303,19 +306,15 @@ unsafeCoerceCase = unsafeCoerce
 
 {-# INLINE lockCase #-}
 
-lockCase !cas =
-    caseWithChan
-        cas
-        (\chan ->
-              takeMVar (_lock chan))
+lockCase :: Case a -> IO ()
+lockCase (Recv chan _)   = takeMVar (_lock chan)
+lockCase (Send chan _ _) = takeMVar (_lock chan)
 
 {-# INLINE unlockCase #-}
 
-unlockCase !cas =
-    caseWithChan
-        cas
-        (\chan ->
-              putMVar (_lock chan) ())
+unlockCase :: Case a -> IO ()
+unlockCase (Recv chan _)   = putMVar (_lock chan) ()
+unlockCase (Send chan _ _) = putMVar (_lock chan) ()
 
 selLock
     :: (VG.Vector v e, e ~ Case a)
@@ -325,7 +324,7 @@ selLock !vec = do
   where
     len = VG.length vec
     go n prevId = do
-        let cas = (vec VG.! n)
+        let !cas = vec VG.! n
         if n == len - 1
             then do
                 lockCase cas
@@ -341,7 +340,7 @@ selUnlock !vec = do
   where
     len = VG.length vec
     go n prevId = do
-        let cas = (vec VG.! n)
+        let !cas = vec VG.! n
         if n == 0
             then do
                 unlockCase cas
@@ -383,16 +382,20 @@ mkChan !size = do
 chanSend :: Chan a -> a -> IO ()
 chanSend !chan !val = void $ chanSendInternal chan val True
 
+chanSendAsync :: Chan a -> a -> IO Bool
+chanSendAsync !chan !val = chanSendInternal chan val False
+
 chanSendInternal :: Chan a -> a -> Bool -> IO Bool
 chanSendInternal !chan !val !block = do
-    isClosed <- readIORef (_closed chan)
-    recvq_first <- readIORef (_first (_recvq chan))
-    qcount <- readIORef (_qcount chan)
+    !isClosed <- readIORef (_closed chan)
+    !recvq_first <- readIORef (_first (_recvq chan))
+    !qcount <- readIORef (_qcount chan)
+    -- Fast path: check for failed non-blocking operation without acquiring the lock.
     if not block && not isClosed && ((_qsize chan == 0 && isJust recvq_first) || (_qsize chan > 0 && qcount == _qsize chan))
         then return False
         else do
             takeMVar (_lock chan)
-            isClosed <- readIORef (_closed chan)
+            !isClosed <- readIORef (_closed chan)
             if isClosed
                 then do
                     putMVar (_lock chan) ()
@@ -404,13 +407,13 @@ chanSendInternal !chan !val !block = do
                             send chan (unsafeCoerceSleeper s) val (putMVar (_lock chan) ())
                             return True
                         Nothing -> do
-                            qcount <- readIORef (_qcount chan)
+                            !qcount <- readIORef (_qcount chan)
                             if qcount < _qsize chan
                                 then do
-                                    sendx <- readIORef (_sendx chan)
+                                    !sendx <- readIORef (_sendx chan)
                                     writeArray (_buf chan) sendx val
                                     writeIORef (_sendx chan) $! (sendx + 1)
-                                    let sendx' = sendx + 1
+                                    let !sendx' = sendx + 1
                                     if sendx' == _qsize chan
                                         then writeIORef (_sendx chan) 0
                                         else writeIORef (_sendx chan) $! sendx'
@@ -427,17 +430,17 @@ chanSendInternal !chan !val !block = do
                                              elem <- newIORef val
                                              park <- newEmptyMVar -- we're about to park
                                              id <-
-                                                 atomicModifyIORef' -- TODO: delete once we have ptr equality
+                                                 atomicModifyIORef'
                                                      currSIdRef
                                                      (\currId ->
                                                            (currId + 1, currId))
-                                             let s = (SomeSleeper (Sleeper Nothing Nothing next prev (Just elem) chan park id))
+                                             let !s = (SomeSleeper (Sleeper Nothing Nothing next prev (Just elem) chan park id))
                                              enqueue (_sendq chan) s
                                              putMVar (_lock chan) ()
                                              ms' <- takeMVar park
                                              case ms' of
                                                  Nothing -> do
-                                                     isClosed <- readIORef (_closed chan)
+                                                     !isClosed <- readIORef (_closed chan)
                                                      unless isClosed (fail "chansend: spurious wakeup")
                                                      fail "send on closed channel"
                                                  _ -> return True
@@ -455,7 +458,7 @@ send !chan !s !val !unlock = do
 closeChan :: Chan a -> IO ()
 closeChan !chan = do
     takeMVar (_lock chan)
-    isClosed <- readIORef (_closed chan)
+    !isClosed <- readIORef (_closed chan)
     when isClosed $
         do putMVar (_lock chan) ()
            fail "close of closed channel"
@@ -481,25 +484,36 @@ closeChan !chan = do
             (\(SomeSleeper s) ->
                   putMVar (_park s) Nothing)
 
-chanRecv :: Chan a -> IO (Maybe a)
+chanRecvAsync :: Chan a -> IO (Maybe (Result a))
+chanRecvAsync !chan = do
+    ref <- newIORef undefined
+    chanRecvInternal chan (Just ref) False >>=
+        \case
+            (False,_) -> return Nothing
+            (True,False) -> return (Just Closed)
+            (True,True) -> Just <$> Msg <$> readIORef ref
+
+chanRecv :: Chan a -> IO (Result a)
 chanRecv !chan = do
     ref <- newIORef undefined
-    (selected,received) <- chanRecvInternal chan (Just ref) True
-    if received
-        then Just <$> readIORef ref
-        else return Nothing
+    chanRecvInternal chan (Just ref) True >>=
+        \case
+            (_,False) -> return Closed
+            (_,True) -> Msg <$> readIORef ref
 
 chanRecvInternal :: Chan a -> Maybe (IORef a) -> Bool -> IO (Bool, Bool)
 chanRecvInternal !chan !melemRef !block = do
-    sendq_first <- readIORef (_first (_sendq chan))
-    qcount <- atomicReadIORef (_qcount chan)
-    isClosed <- atomicReadIORef (_closed chan)
+    -- Fast path: check for failed non-blocking operation without acquiring the lock.
+    -- WARNING: the order of these reads is important.
+    !sendq_first <- readIORef (_first (_sendq chan))
+    !qcount <- atomicReadIORef (_qcount chan)
+    !isClosed <- atomicReadIORef (_closed chan)
     if not block && ((_qsize chan == 0 && isNothing sendq_first) || (_qsize chan > 0 && qcount == _qsize chan)) && not isClosed
         then return (False, False)
         else do
             takeMVar (_lock chan)
-            isClosed <- readIORef (_closed chan)
-            qcount <- readIORef (_qcount chan)
+            !isClosed <- readIORef (_closed chan)
+            !qcount <- readIORef (_qcount chan)
             if isClosed && qcount == 0
                 then do
                     putMVar (_lock chan) ()
@@ -513,13 +527,13 @@ chanRecvInternal !chan !melemRef !block = do
                         _ ->
                             if qcount > 0
                                 then do
-                                    recvx <- readIORef (_recvx chan)
-                                    !val <- readArray (_buf chan) recvx
+                                    !recvx <- readIORef (_recvx chan)
+                                    val <- readArray (_buf chan) recvx
                                     case melemRef of
                                         Just elemRef -> writeIORef elemRef val
                                         _ -> return ()
-                                    let recvx' =
-                                            let x = recvx + 1
+                                    let !recvx' =
+                                            let !x = recvx + 1
                                             in if x == _qsize chan
                                                    then 0
                                                    else x
@@ -536,11 +550,11 @@ chanRecvInternal !chan !melemRef !block = do
                                              prev <- newIORef Nothing
                                              park <- newEmptyMVar -- we're about to park
                                              id <-
-                                                 atomicModifyIORef' -- TODO: delete once we have ptr equality
+                                                 atomicModifyIORef'
                                                      currSIdRef
                                                      (\currId ->
                                                            (currId + 1, currId))
-                                             let s = SomeSleeper (Sleeper Nothing Nothing next prev melemRef chan park id)
+                                             let !s = SomeSleeper (Sleeper Nothing Nothing next prev melemRef chan park id)
                                              enqueue (_recvq chan) s
                                              putMVar (_lock chan) ()
                                              ms' <- takeMVar park -- park
@@ -551,20 +565,19 @@ recv !chan !s !melemRef !unlock = do
     if _qsize chan == 0
         then case melemRef of
                  Just elemRef -> do
-                     val <- readIORef (fromJust (_elem s))
-                     evaluate val
+                     !val <- readIORef (fromJust (_elem s))
                      writeIORef elemRef val
                  _ -> return ()
         else do
-            recvx <- readIORef (_recvx chan)
-            !val <- readArray (_buf chan) recvx
+            !recvx <- readIORef (_recvx chan)
+            val <- readArray (_buf chan) recvx
             case melemRef of
                 Just elemRef -> writeIORef elemRef val
                 _            -> return ()
-            val' <- readIORef (fromJust (_elem s))
+            !val' <- readIORef (fromJust (_elem s))
             writeArray (_buf chan) recvx val'
-            let recvx' =
-                    let x = recvx + 1
+            let !recvx' =
+                    let !x = recvx + 1
                     in if x == _qsize chan
                            then 0
                            else x
@@ -573,7 +586,9 @@ recv !chan !s !melemRef !unlock = do
     unlock
     putMVar (_park s) (Just s) -- unpark
 
-enqueue :: WaitQ -> SomeSleeper -> IO ()
+-- enqueue a Supsend.
+enqueue
+    :: WaitQ -> SomeSleeper -> IO ()
 enqueue !q someS@(SomeSleeper s) = do
     writeIORef (_next s) Nothing
     mx <- readIORef . _last $ q
@@ -587,13 +602,17 @@ enqueue !q someS@(SomeSleeper s) = do
             writeIORef (_next x) (Just someS)
             writeIORef (_last q) (Just someS)
 
-dequeue :: WaitQ -> IO (Maybe SomeSleeper)
+-- dequeue each Suspend until one is found that can be resumed;
+-- if we dequeue one that participates in a select, and it is already
+-- flagged as selected, continue dequeuing.
+dequeue
+    :: WaitQ -> IO (Maybe SomeSleeper)
 dequeue !q = do
-    ms <- readIORef (_first q)
+    !ms <- readIORef (_first q)
     case ms of
         Nothing -> return Nothing
         Just someS@(SomeSleeper s) -> do
-            my <- readIORef (_next s)
+            !my <- readIORef (_next s)
             case my of
                 Nothing -> do
                     writeIORef (_first q) Nothing
@@ -609,7 +628,7 @@ dequeue !q = do
                     if not done
                         then do
                             -- attempt to set the "selectdone" flag and return
-                            -- the sleeper.
+                            -- the Suspend.
                             -- if someone beat us to it, try dequeuing again.
                             oldDone <-
                                 atomicModifyIORef'
@@ -618,15 +637,15 @@ dequeue !q = do
                                           (True, oldDone))
                             if oldDone
                                 then do
-                                    -- we did *not* signal; try again
+                                    -- we did *not* win the race; try again
                                     dequeue
                                         q
                                 else do
-                                    -- signalled! done.
+                                    -- we won! done.
                                     return
                                         (Just someS)
                         else do
-                            -- we did *not* signal; try again
+                            -- we did *not* win the race; try again
                             dequeue
                                 q
 
@@ -639,15 +658,16 @@ atomicReadIORef !ref =
         (\oldVal ->
               (oldVal, oldVal))
 
--- TODO: Consider (carefully) using pointer equality.
+-- TODO: Consider (carefully) using pointer equality instead of maintaining a
+-- unique ID.
 eqSleeper
     :: Sleeper a -> Sleeper b -> Bool
 eqSleeper !s1 !s2 = _sid s1 == _sid s2
 
 dequeueSleeper :: WaitQ -> SomeSleeper -> IO ()
 dequeueSleeper !q someS@(SomeSleeper s) = do
-    mx <- readIORef (_prev s)
-    my <- readIORef (_next s)
+    !mx <- readIORef (_prev s)
+    !my <- readIORef (_next s)
     case mx of
         Just someX@(SomeSleeper x) ->
             case my of
@@ -667,7 +687,7 @@ dequeueSleeper !q someS@(SomeSleeper s) = do
                     writeIORef (_first q) (Just someY)
                     writeIORef (_next s) Nothing
                 _ -> do
-                    mfirst <- readIORef (_first q)
+                    !mfirst <- readIORef (_first q)
                     case mfirst of
                         Just someFirst@(SomeSleeper first) ->
                             when (first `eqSleeper` s) $
@@ -680,14 +700,14 @@ dequeueSleeper !q someS@(SomeSleeper s) = do
 waitqToList
     :: WaitQ -> IO [SomeSleeper]
 waitqToList q = do
-    ms <- readIORef (_first q)
+    !ms <- readIORef (_first q)
     case ms of
         Just s -> sleeperChain s
         _      -> return []
 
 sleeperChain :: SomeSleeper -> IO [SomeSleeper]
 sleeperChain someS@(SomeSleeper s) = do
-    mnext <- readIORef (_next s)
+    !mnext <- readIORef (_next s)
     case mnext of
         Just next -> do
             ss <- sleeperChain next
@@ -697,7 +717,7 @@ sleeperChain someS@(SomeSleeper s) = do
 printWaitQ :: WaitQ -> IO ()
 printWaitQ q = do
     ss <- waitqToList q
-    let chain =
+    let !chain =
             intercalate
                 "->"
                 (map
