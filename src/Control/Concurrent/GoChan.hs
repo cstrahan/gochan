@@ -6,8 +6,8 @@
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeFamilies              #-}
 
--- | This module provides bounded, (optionally) buffered channels similar to
--- those seen in the Go programming language.
+-- | This module provides bounded channels similar to those seen in the Go
+-- programming language.
 module Control.Concurrent.GoChan
   ( -- * Types
    Chan
