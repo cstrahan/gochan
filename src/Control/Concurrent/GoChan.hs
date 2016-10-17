@@ -41,7 +41,8 @@ import           System.IO.Unsafe
 import           System.Random
 import           Unsafe.Coerce
 
--- | The core data type. A @'Chan' α@ can send and receive messages of type @α@.
+-- | The core data type. A @'Chan' α@ provides a conduit through which messages
+-- of type @α@ can be sent and received.
 data Chan a = Chan
     { _qcount :: {-# UNPACK #-} !(IORef Int)
     , _qsize  :: {-# UNPACK #-} !Int
