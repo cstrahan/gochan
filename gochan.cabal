@@ -1,5 +1,5 @@
 name: gochan
-version: 0.0.0.1
+version: 0.0.1
 cabal-version: >=1.10
 build-type: Simple
 license: MIT
@@ -9,6 +9,8 @@ maintainer: charles@cstrahan.com
 homepage: http://github.com/cstrahan/gochan
 bug-reports: http://github.com/cstrahan/gochan/issues
 synopsis: Go-style channels
+description: This library provides channels similar to those popularized by the
+             Go programming language.
 category: Concurrency
 author: Charles Strahan
 extra-source-files:

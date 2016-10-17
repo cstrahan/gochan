@@ -1,2 +1,11 @@
 * Unboxed channels a la Data.Vector.Unboxed
 * Run through http://ghc.readthedocs.io/en/8.0.1/using-optimisation.html
+
+Maybe useful:
+
+* https://wiki.haskell.org/Performance/Data_types
+* https://ghc.haskell.org/trac/ghc/wiki/UnpackedSumTypes
+* https://github.com/ghc-proposals/ghc-proposals/pull/8
+* https://wiki.haskell.org/AtomicMemoryOps
+* https://ghc.haskell.org/trac/ghc/wiki/AtomicPrimops
+* https://ghc.haskell.org/trac/ghc/ticket/10417

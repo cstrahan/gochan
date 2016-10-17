@@ -20,7 +20,7 @@ main =
             io "buffered select recv" selectRecv chanBufferedAlreadySent)
 
 chanConstruction :: () -> IO ()
-chanConstruction = const (void (mkChan 0 :: IO (Chan Int)))
+chanConstruction = const (void (chanMake 0 :: IO (Chan Int)))
 
 unbufferedSendRecv :: Chan Int -> IO ()
 unbufferedSendRecv c = do
@@ -30,8 +30,8 @@ unbufferedSendRecv c = do
 
 unselectSendRecv :: Chan Int -> IO ()
 unselectSendRecv c = do
-    forkIO $ select [Send c 0 (return ())] Nothing
-    select [Recv c (const (return ()))] Nothing
+    forkIO $ chanSelect [Send c 0 (return ())] Nothing
+    chanSelect [Recv c (const (return ()))] Nothing
     return ()
 
 simpleSend :: Chan Int -> IO ()
@@ -41,10 +41,10 @@ simpleRecv :: Chan Int -> IO ()
 simpleRecv c = void (chanRecv c)
 
 selectSend :: Chan Int -> IO ()
-selectSend c = select [Send c 0 (return ())] Nothing
+selectSend c = chanSelect [Send c 0 (return ())] Nothing
 
 selectRecv :: Chan Int -> IO ()
-selectRecv c = select [Recv c (const (return ()))] Nothing
+selectRecv c = chanSelect [Recv c (const (return ()))] Nothing
 
 --------------------------------------------------------------------------------
 -- We don't want these to show up in allocations, so carefully unsafePerformIO
@@ -53,27 +53,27 @@ selectRecv c = select [Recv c (const (return ()))] Nothing
 {-# NOINLINE chanUnbuffered #-}
 
 chanUnbuffered :: Chan Int
-chanUnbuffered = unsafePerformIO (mkChan 0)
+chanUnbuffered = unsafePerformIO (chanMake 0)
 
 {-# NOINLINE chanUnbufferedAlreadySent #-}
 
 chanUnbufferedAlreadySent :: Chan Int
 chanUnbufferedAlreadySent =
     unsafePerformIO $
-    do c <- mkChan 0
+    do c <- chanMake 0
        forkIO $ chanSend c 0
        return c
 
 {-# NOINLINE chanBufferedEmpty #-}
 
 chanBufferedEmpty :: Chan Int
-chanBufferedEmpty = unsafePerformIO (mkChan 1)
+chanBufferedEmpty = unsafePerformIO (chanMake 1)
 
 {-# NOINLINE chanBufferedAlreadySent #-}
 
 chanBufferedAlreadySent :: Chan Int
 chanBufferedAlreadySent =
     unsafePerformIO $
-    do c <- mkChan 1
+    do c <- chanMake 1
        chanSend c 0
        return c

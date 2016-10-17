@@ -12,7 +12,7 @@ main :: IO ()
 main =
     hspec $
     do describe "with buffer size 0" $
-           do it "mkChan doesn't blow up" $ do void (mkChan 0 :: IO (Chan Int))
+           do it "chanMake doesn't blow up" $ do void (chanMake 0 :: IO (Chan Int))
               it "send & recv doesn't blow up" $ do sendRecv 0 1 10 sendN drain
               it "send & recv/select doesn't blow up" $
                   do sendRecv 0 1 10 sendN drainSelect
@@ -22,7 +22,7 @@ main =
                   do sendRecv 0 1 10 sendNSelect drainSelect
               it "multi-case select doesn't blow up" $ do multiTest 0
        describe "with buffer size 1" $
-           do it "mkChan doesn't blow up" $ void (mkChan 1 :: IO (Chan Int))
+           do it "chanMake doesn't blow up" $ void (chanMake 1 :: IO (Chan Int))
               it "send & recv doesn't blow up" $ do sendRecv 1 1 10 sendN drain
               it "send & recv/select doesn't blow up" $
                   do sendRecv 1 1 10 sendN drainSelect
@@ -32,7 +32,7 @@ main =
                   do sendRecv 1 1 10 sendNSelect drainSelect
               it "multi-case select doesn't blow up" $ do multiTest 1
        describe "with buffer size 2" $
-           do it "mkChan doesn't blow up" $ void (mkChan 2 :: IO (Chan Int))
+           do it "chanMake doesn't blow up" $ void (chanMake 2 :: IO (Chan Int))
               it "send & recv doesn't blow up" $ do sendRecv 2 1 10 sendN drain
               it "send & recv/select doesn't blow up" $
                   do sendRecv 2 1 10 sendN drainSelect
@@ -42,7 +42,7 @@ main =
                   do sendRecv 2 1 10 sendNSelect drainSelect
               it "multi-case select doesn't blow up" $ do multiTest 2
        describe "with buffer size 3" $
-           do it "mkChan doesn't blow up" $ do void (mkChan 3 :: IO (Chan Int))
+           do it "chanMake doesn't blow up" $ do void (chanMake 3 :: IO (Chan Int))
               it "send & recv doesn't blow up" $ do sendRecv 3 1 10 sendN drain
               it "send & recv/select doesn't blow up" $
                   do sendRecv 3 1 10 sendN drainSelect
@@ -67,7 +67,7 @@ drain ch recvAct closeAct = do
 
 drainSelect :: Drainer
 drainSelect ch recvAct closeAct = do
-    select
+    chanSelect
         [ Recv
               ch
               (\case
@@ -84,17 +84,17 @@ sendN ch low hi = do
 
 sendNSelect :: Sender
 sendNSelect ch low hi = do
-    select [Send ch low (return ())] Nothing
+    chanSelect [Send ch low (return ())] Nothing
     when (low < hi) (sendNSelect ch (low + 1) hi)
 
 sendRecv :: Int -> Int -> Int -> Sender -> Drainer -> Expectation
 sendRecv size low hi sender drainer = do
     lock <- newEmptyMVar
-    c <- mkChan size
+    c <- chanMake size
     totalRef <- newIORef 0
     forkIO $
         do sender c low hi
-           closeChan c
+           chanClose c
     drainer
         c
         (\n ->
@@ -113,8 +113,8 @@ multiTest :: Int -> Expectation
 multiTest size = do
     lock1 <- newEmptyMVar
     lock2 <- newEmptyMVar
-    c1 <- mkChan size
-    c2 <- mkChan size
+    c1 <- chanMake size
+    c2 <- chanMake size
     c1sentRef <- newIORef 0
     c1recvdRef <- newIORef 0
     c2sentRef <- newIORef 0
@@ -142,7 +142,7 @@ ping2
 ping2 ref1 ref2 c1 c2 n doneAct = do
     if (n < 20)
         then do
-            select
+            chanSelect
                 [ Send c1 n (void (modifyIORef' ref1 (+ 1)))
                 , Send c2 n (void (modifyIORef' ref2 (+ 1)))]
                 Nothing
@@ -160,7 +160,7 @@ pong2
 pong2 ref1 ref2 c1 c2 n doneAct = do
     if (n < 20)
         then do
-            select
+            chanSelect
                 [ Recv
                       c1
                       (\case

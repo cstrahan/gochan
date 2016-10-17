@@ -1,5 +1,3 @@
--- {-# OPTIONS_GHC  #-}
--- -fexpose-all-unfoldings
 {-# LANGUAGE BangPatterns              #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE LambdaCase                #-}
@@ -8,7 +6,22 @@
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeFamilies              #-}
 
-module Control.Concurrent.GoChan where
+-- | This module provides bounded, (optionally) buffered channels similar to
+-- those seen in the Go programming language.
+module Control.Concurrent.GoChan
+  ( -- * Types
+   Chan
+  ,Result(..)
+  ,Case(..)
+    -- * Functions
+  ,chanMake
+  ,chanClose
+  ,chanRecv
+  ,chanRecvAsync
+  ,chanSend
+  ,chanSendAsync
+  ,chanSelect)
+  where
 
 import           Control.Concurrent.MVar
 import           Control.Monad
@@ -28,6 +41,7 @@ import           System.IO.Unsafe
 import           System.Random
 import           Unsafe.Coerce
 
+-- | The core data type. A @'Chan' α@ can send and receive messages of type @α@.
 data Chan a = Chan
     { _qcount :: {-# UNPACK #-} !(IORef Int)
     , _qsize  :: {-# UNPACK #-} !Int
@@ -60,21 +74,31 @@ data Sleeper a = forall b. Sleeper
     , _sid        :: !Word64
     }
 
+-- | The `Result` record represents the result of waiting to  on a 'Chan'nel;
+-- either a 'Msg' was received, or the 'Chan'nel was 'Closed'.
 data Result a
     = Msg a
     | Closed
 
+-- | When used with 'chanSelect`, 'Case's provide a means of waiting for a
+-- 'Send' or 'Recv' to complete on their respective 'Chan'nels.
+--
+-- ['Recv' chan act] Wait to receive value on @chan@, invoking @act result@
+-- when selected.
+--
+-- ['Send' chan val act] Wait to send @val@ on @chan@, invoking @act@ when
+-- selected.
 data Case a
-    = forall b. Recv !(Chan b)
-                     !(Result b -> IO a)
-    | forall b. Send !(Chan b)
-                     !b
-                     !(IO a)
+    = forall b. Recv (Chan b)
+                     (Result b -> IO a)
+    | forall b. Send (Chan b)
+                     b
+                     (IO a)
 
 {-# INLINE caseChanId #-}
 
 caseChanId :: Case a -> Word64
-caseChanId (Recv chan _)   = _id chan
+caseChanId (Recv chan _) = _id chan
 caseChanId (Send chan _ _) = _id chan
 
 {-# NOINLINE currIdRef #-}
@@ -100,10 +124,19 @@ shuffleVector !xs = do
             VGM.write xs j vi
             VGM.write xs i vj
 
-select
-    :: forall a.
-       [Case a] -> Maybe (IO a) -> IO a
-select cases mdefault = do
+-- | When no default action is given, blocks until one of the cases can run,
+-- then it executes that case. It chooses one at random if multiple are ready.
+--
+-- If given a default action, and no cases can run, immediately executes the
+-- default action.
+chanSelect
+    :: [Case a]     -- ^ The list of 'Case's.
+    -> Maybe (IO a) -- ^ When 'Nothing', wait synchronously to select a
+                    -- case; when @'Just' act@, run @act@ as a default
+                    -- instead of blocking.
+    -> IO a         -- ^ The value resulting from the selected 'Case'
+                    -- (or default action).
+chanSelect cases mdefault = do
     -- randomize the poll order to enforce fairness.
     !pollOrder <-
         -- for reasons unknown to me, we get better performance when we don't
@@ -276,7 +309,8 @@ select cases mdefault = do
                                  _ -> do
                                      -- channel closed, restart loop to figure
                                      -- out which one.
-                                     pass1 0
+                                     pass1
+                                         0
     pass1 0
 
 {-# INLINE unsafeCoerceSendAction #-}
@@ -307,13 +341,13 @@ unsafeCoerceCase = unsafeCoerce
 {-# INLINE lockCase #-}
 
 lockCase :: Case a -> IO ()
-lockCase (Recv chan _)   = takeMVar (_lock chan)
+lockCase (Recv chan _) = takeMVar (_lock chan)
 lockCase (Send chan _ _) = takeMVar (_lock chan)
 
 {-# INLINE unlockCase #-}
 
 unlockCase :: Case a -> IO ()
-unlockCase (Recv chan _)   = putMVar (_lock chan) ()
+unlockCase (Recv chan _) = putMVar (_lock chan) ()
 unlockCase (Send chan _ _) = putMVar (_lock chan) ()
 
 selLock
@@ -348,8 +382,10 @@ selUnlock !vec = do
                 when (caseChanId cas /= prevId) $ do (unlockCase cas)
                 go (n - 1) (caseChanId cas)
 
-mkChan :: Int -> IO (Chan a)
-mkChan !size = do
+-- | Make a 'Chan'nel with the given buffer size.
+chanMake
+    :: Int -> IO (Chan a)
+chanMake !size = do
     ary <- newArray_ (0, size - 1)
     qcount <- newIORef 0
     sendx <- newIORef 0
@@ -379,10 +415,15 @@ mkChan !size = do
         , _id = id
         }
 
-chanSend :: Chan a -> a -> IO ()
+-- | Wait to successfully send a value on a 'Chan'nel.
+chanSend
+    :: Chan a -> a -> IO ()
 chanSend !chan !val = void $ chanSendInternal chan val True
 
-chanSendAsync :: Chan a -> a -> IO Bool
+-- | Attempt to send a value on a 'Chan'nel. Returns 'True' when successfull,
+-- 'False' otherwise.
+chanSendAsync
+    :: Chan a -> a -> IO Bool
 chanSendAsync !chan !val = chanSendInternal chan val False
 
 chanSendInternal :: Chan a -> a -> Bool -> IO Bool
@@ -455,8 +496,10 @@ send !chan !s !val !unlock = do
     unlock
     putMVar (_park s) (Just s) -- unpark
 
-closeChan :: Chan a -> IO ()
-closeChan !chan = do
+-- | Close a 'Chan'nel.
+chanClose
+    :: Chan a -> IO ()
+chanClose !chan = do
     takeMVar (_lock chan)
     !isClosed <- readIORef (_closed chan)
     when isClosed $
@@ -472,19 +515,21 @@ closeChan !chan = do
         ms <- dequeue (_recvq chan)
         case ms of
             Nothing -> return ss
-            Just s  -> releaseReaders (s : ss) chan
+            Just s -> releaseReaders (s : ss) chan
     releaseWriters ss chan = do
         ms <- dequeue (_sendq chan)
         case ms of
             Nothing -> return ss
-            Just s  -> releaseReaders (s : ss) chan
+            Just s -> releaseReaders (s : ss) chan
     wakeSleepers ss =
         forM_
             ss
             (\(SomeSleeper s) ->
                   putMVar (_park s) Nothing)
 
-chanRecvAsync :: Chan a -> IO (Maybe (Result a))
+-- | Attempt to receive a value on a 'Chan'nel.
+chanRecvAsync
+    :: Chan a -> IO (Maybe (Result a))
 chanRecvAsync !chan = do
     ref <- newIORef undefined
     chanRecvInternal chan (Just ref) False >>=
@@ -493,7 +538,9 @@ chanRecvAsync !chan = do
             (True,False) -> return (Just Closed)
             (True,True) -> Just <$> Msg <$> readIORef ref
 
-chanRecv :: Chan a -> IO (Result a)
+-- | Wait to receive a value on a 'Chan'nel.
+chanRecv
+    :: Chan a -> IO (Result a)
 chanRecv !chan = do
     ref <- newIORef undefined
     chanRecvInternal chan (Just ref) True >>=
@@ -573,7 +620,7 @@ recv !chan !s !melemRef !unlock = do
             val <- readArray (_buf chan) recvx
             case melemRef of
                 Just elemRef -> writeIORef elemRef val
-                _            -> return ()
+                _ -> return ()
             !val' <- readIORef (fromJust (_elem s))
             writeArray (_buf chan) recvx val'
             let !recvx' =
@@ -638,16 +685,14 @@ dequeue !q = do
                             if oldDone
                                 then do
                                     -- we did *not* win the race; try again
-                                    dequeue
-                                        q
+                                    dequeue q
                                 else do
                                     -- we won! done.
                                     return
                                         (Just someS)
                         else do
                             -- we did *not* win the race; try again
-                            dequeue
-                                q
+                            dequeue q
 
 {-# INLINE atomicReadIORef #-}
 
@@ -703,7 +748,7 @@ waitqToList q = do
     !ms <- readIORef (_first q)
     case ms of
         Just s -> sleeperChain s
-        _      -> return []
+        _ -> return []
 
 sleeperChain :: SomeSleeper -> IO [SomeSleeper]
 sleeperChain someS@(SomeSleeper s) = do
