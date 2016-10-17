@@ -49,29 +49,29 @@ data Chan a = Chan
     , _buf    :: {-# UNPACK #-} !(IOArray Int a)
     , _sendx  :: {-# UNPACK #-} !(IORef Int)
     , _recvx  :: {-# UNPACK #-} !(IORef Int)
-    , _sendq  :: {-# UNPACK #-} !WaitQ
-    , _recvq  :: {-# UNPACK #-} !WaitQ
+    , _sendq  :: {-# UNPACK #-} !SuspQ
+    , _recvq  :: {-# UNPACK #-} !SuspQ
     , _lock   :: {-# UNPACK #-} !(MVar ())
     , _closed :: {-# UNPACK #-} !(IORef Bool)
     , _id     :: {-# UNPACK #-} !Word64
     }
 
-data WaitQ = WaitQ
-    { _first :: {-# UNPACK #-} !(IORef (Maybe SomeSleeper))
-    , _last  :: {-# UNPACK #-} !(IORef (Maybe SomeSleeper))
+data SuspQ = SuspQ
+    { _first :: {-# UNPACK #-} !(IORef (Maybe SomeSuspend))
+    , _last  :: {-# UNPACK #-} !(IORef (Maybe SomeSuspend))
     }
 
-data SomeSleeper =
-    forall a. SomeSleeper (Sleeper a)
+data SomeSuspend =
+    forall a. SomeSuspend (Suspend a)
 
-data Sleeper a = forall b. Sleeper
+data Suspend a = forall b. Suspend
     { _selectDone :: !(Maybe (IORef Bool))
     , _case       :: !(Maybe (Case b))
-    , _next       :: !(IORef (Maybe SomeSleeper))
-    , _prev       :: !(IORef (Maybe SomeSleeper))
+    , _next       :: !(IORef (Maybe SomeSuspend))
+    , _prev       :: !(IORef (Maybe SomeSuspend))
     , _elem       :: !(Maybe (IORef a))
     , _chan       :: !(Chan a)
-    , _park       :: !(MVar (Maybe (Sleeper a))) -- park, and when unparked, the awoken sleeper is given
+    , _park       :: !(MVar (Maybe (Suspend a))) -- park, and when unparked, the awoken sleeper is given
     , _sid        :: !Word64
     }
 
@@ -162,9 +162,9 @@ chanSelect cases mdefault = do
                          Recv chan act -> do
                              ms <- dequeue (_sendq chan)
                              case ms of
-                                 Just (SomeSleeper s) -> do
+                                 Just (SomeSuspend s) -> do
                                      elemRef <- newIORef undefined
-                                     recv chan (unsafeCoerceSleeper s) (Just elemRef) (selUnlock lockOrder)
+                                     recv chan (unsafeCoerceSuspend s) (Just elemRef) (selUnlock lockOrder)
                                      val <- readIORef elemRef
                                      act (Msg val)
                                  _ -> do
@@ -199,8 +199,8 @@ chanSelect cases mdefault = do
                                  else do
                                      ms <- dequeue (_recvq chan)
                                      case ms of
-                                         Just (SomeSleeper s) -> do
-                                             send chan (unsafeCoerceSleeper s) val (selUnlock lockOrder)
+                                         Just (SomeSuspend s) -> do
+                                             send chan (unsafeCoerceSuspend s) val (selUnlock lockOrder)
                                              act
                                          _ -> do
                                              !qcount <- readIORef (_qcount chan)
@@ -248,8 +248,8 @@ chanSelect cases mdefault = do
                                               cas@(Send chan val _) -> do
                                                   elemRef <- newIORef (unsafeCoerce val)
                                                   let !s =
-                                                          SomeSleeper
-                                                              (Sleeper
+                                                          SomeSuspend
+                                                              (Suspend
                                                                    (Just selectDone)
                                                                    (Just (unsafeCoerceCase cas))
                                                                    next
@@ -263,8 +263,8 @@ chanSelect cases mdefault = do
                                               cas@(Recv chan _) -> do
                                                   elemRef <- newIORef undefined
                                                   let !s =
-                                                          SomeSleeper
-                                                              (Sleeper
+                                                          SomeSuspend
+                                                              (Suspend
                                                                    (Just selectDone)
                                                                    (Just (unsafeCoerceCase cas))
                                                                    next
@@ -282,23 +282,23 @@ chanSelect cases mdefault = do
                              -- earlier.
                              let pass3 !n = do
                                      case ss VG.! n of
-                                         someS@(SomeSleeper s) ->
+                                         someS@(SomeSuspend s) ->
                                              case s of
-                                                 (Sleeper _ cas _ _ _ _ _ _) ->
+                                                 (Suspend _ cas _ _ _ _ _ _) ->
                                                      case cas of
                                                          Just (Send _ _ _) -> do
                                                              --
-                                                             dequeueSleeper
+                                                             dequeueSuspend
                                                                  (_sendq (_chan s))
                                                                  someS
                                                          Just (Recv _ _) -> do
-                                                             dequeueSleeper (_recvq (_chan s)) someS
+                                                             dequeueSuspend (_recvq (_chan s)) someS
                                      when ((n + 1) /= ncases) (pass3 (n + 1))
                              pass3 0
                              case ms of
                                  Just s -> do
                                      case s of
-                                         (Sleeper _ cas _ _ _ _ _ _) ->
+                                         (Suspend _ cas _ _ _ _ _ _) ->
                                              case cas of
                                                  Just (Send chan _ act) -> do
                                                      selUnlock lockOrder
@@ -324,10 +324,10 @@ unsafeCoerceSendAction = unsafeCoerce
 unsafeCoerceRecvAction :: (Result b -> IO a) -> (Result d -> IO c)
 unsafeCoerceRecvAction = unsafeCoerce
 
-{-# INLINE unsafeCoerceSleeper #-}
+{-# INLINE unsafeCoerceSuspend #-}
 
-unsafeCoerceSleeper :: Sleeper a -> Sleeper b
-unsafeCoerceSleeper = unsafeCoerce
+unsafeCoerceSuspend :: Suspend a -> Suspend b
+unsafeCoerceSuspend = unsafeCoerce
 
 {-# INLINE unsafeCoerceChan #-}
 
@@ -409,8 +409,8 @@ chanMake !size = do
         , _buf = ary
         , _sendx = sendx
         , _recvx = recvx
-        , _sendq = WaitQ sendq_first sendq_last
-        , _recvq = WaitQ recvq_first recvq_last
+        , _sendq = SuspQ sendq_first sendq_last
+        , _recvq = SuspQ recvq_first recvq_last
         , _lock = lock
         , _closed = closed
         , _id = id
@@ -445,8 +445,8 @@ chanSendInternal !chan !val !block = do
                 else do
                     ms <- dequeue (_recvq chan)
                     case ms of
-                        Just (SomeSleeper s) -> do
-                            send chan (unsafeCoerceSleeper s) val (putMVar (_lock chan) ())
+                        Just (SomeSuspend s) -> do
+                            send chan (unsafeCoerceSuspend s) val (putMVar (_lock chan) ())
                             return True
                         Nothing -> do
                             !qcount <- readIORef (_qcount chan)
@@ -476,7 +476,7 @@ chanSendInternal !chan !val !block = do
                                                      currSIdRef
                                                      (\currId ->
                                                            (currId + 1, currId))
-                                             let !s = (SomeSleeper (Sleeper Nothing Nothing next prev (Just elem) chan park id))
+                                             let !s = (SomeSuspend (Suspend Nothing Nothing next prev (Just elem) chan park id))
                                              enqueue (_sendq chan) s
                                              putMVar (_lock chan) ()
                                              ms' <- takeMVar park
@@ -487,7 +487,7 @@ chanSendInternal !chan !val !block = do
                                                      fail "send on closed channel"
                                                  _ -> return True
 
-send :: Chan a -> Sleeper a -> a -> IO () -> IO ()
+send :: Chan a -> Suspend a -> a -> IO () -> IO ()
 send !chan !s !val !unlock = do
     case _elem s of
         Just elemRef -> do
@@ -510,7 +510,7 @@ chanClose !chan = do
     ss <- releaseReaders [] chan
     ss <- releaseWriters ss chan
     putMVar (_lock chan) ()
-    wakeSleepers ss
+    wakeSuspends ss
   where
     releaseReaders ss chan = do
         ms <- dequeue (_recvq chan)
@@ -522,10 +522,10 @@ chanClose !chan = do
         case ms of
             Nothing -> return ss
             Just s -> releaseReaders (s : ss) chan
-    wakeSleepers ss =
+    wakeSuspends ss =
         forM_
             ss
-            (\(SomeSleeper s) ->
+            (\(SomeSuspend s) ->
                   putMVar (_park s) Nothing)
 
 -- | Attempt to receive a value on a 'Chan'nel.
@@ -569,8 +569,8 @@ chanRecvInternal !chan !melemRef !block = do
                 else do
                     ms <- dequeue (_sendq chan)
                     case ms of
-                        Just (SomeSleeper s) -> do
-                            recv chan (unsafeCoerceSleeper s) melemRef (putMVar (_lock chan) ())
+                        Just (SomeSuspend s) -> do
+                            recv chan (unsafeCoerceSuspend s) melemRef (putMVar (_lock chan) ())
                             return (True, True)
                         _ ->
                             if qcount > 0
@@ -602,13 +602,13 @@ chanRecvInternal !chan !melemRef !block = do
                                                      currSIdRef
                                                      (\currId ->
                                                            (currId + 1, currId))
-                                             let !s = SomeSleeper (Sleeper Nothing Nothing next prev melemRef chan park id)
+                                             let !s = SomeSuspend (Suspend Nothing Nothing next prev melemRef chan park id)
                                              enqueue (_recvq chan) s
                                              putMVar (_lock chan) ()
                                              ms' <- takeMVar park -- park
                                              return (True, isJust ms')
 
-recv :: Chan a -> Sleeper a -> Maybe (IORef a) -> IO () -> IO ()
+recv :: Chan a -> Suspend a -> Maybe (IORef a) -> IO () -> IO ()
 recv !chan !s !melemRef !unlock = do
     if _qsize chan == 0
         then case melemRef of
@@ -636,8 +636,8 @@ recv !chan !s !melemRef !unlock = do
 
 -- enqueue a Supsend.
 enqueue
-    :: WaitQ -> SomeSleeper -> IO ()
-enqueue !q someS@(SomeSleeper s) = do
+    :: SuspQ -> SomeSuspend -> IO ()
+enqueue !q someS@(SomeSuspend s) = do
     writeIORef (_next s) Nothing
     mx <- readIORef . _last $ q
     case mx of
@@ -645,7 +645,7 @@ enqueue !q someS@(SomeSleeper s) = do
             writeIORef (_prev s) Nothing
             writeIORef (_first q) (Just someS)
             writeIORef (_last q) (Just someS)
-        Just someX@(SomeSleeper x) -> do
+        Just someX@(SomeSuspend x) -> do
             writeIORef (_prev s) (Just someX)
             writeIORef (_next x) (Just someS)
             writeIORef (_last q) (Just someS)
@@ -654,18 +654,18 @@ enqueue !q someS@(SomeSleeper s) = do
 -- if we dequeue one that participates in a select, and it is already
 -- flagged as selected, continue dequeuing.
 dequeue
-    :: WaitQ -> IO (Maybe SomeSleeper)
+    :: SuspQ -> IO (Maybe SomeSuspend)
 dequeue !q = do
     !ms <- readIORef (_first q)
     case ms of
         Nothing -> return Nothing
-        Just someS@(SomeSleeper s) -> do
+        Just someS@(SomeSuspend s) -> do
             !my <- readIORef (_next s)
             case my of
                 Nothing -> do
                     writeIORef (_first q) Nothing
                     writeIORef (_last q) Nothing
-                Just someY@(SomeSleeper y) -> do
+                Just someY@(SomeSuspend y) -> do
                     writeIORef (_prev y) Nothing
                     writeIORef (_first q) (Just someY)
                     writeIORef (_next s) Nothing
@@ -706,18 +706,18 @@ atomicReadIORef !ref =
 
 -- TODO: Consider (carefully) using pointer equality instead of maintaining a
 -- unique ID.
-eqSleeper
-    :: Sleeper a -> Sleeper b -> Bool
-eqSleeper !s1 !s2 = _sid s1 == _sid s2
+eqSuspend
+    :: Suspend a -> Suspend b -> Bool
+eqSuspend !s1 !s2 = _sid s1 == _sid s2
 
-dequeueSleeper :: WaitQ -> SomeSleeper -> IO ()
-dequeueSleeper !q someS@(SomeSleeper s) = do
+dequeueSuspend :: SuspQ -> SomeSuspend -> IO ()
+dequeueSuspend !q someS@(SomeSuspend s) = do
     !mx <- readIORef (_prev s)
     !my <- readIORef (_next s)
     case mx of
-        Just someX@(SomeSleeper x) ->
+        Just someX@(SomeSuspend x) ->
             case my of
-                Just someY@(SomeSleeper y) -> do
+                Just someY@(SomeSuspend y) -> do
                     writeIORef (_next x) (Just someY)
                     writeIORef (_prev y) (Just someX)
                     writeIORef (_next s) Nothing
@@ -728,15 +728,15 @@ dequeueSleeper !q someS@(SomeSleeper s) = do
                     writeIORef (_prev s) Nothing
         _ ->
             case my of
-                Just someY@(SomeSleeper y) -> do
+                Just someY@(SomeSuspend y) -> do
                     writeIORef (_prev y) Nothing
                     writeIORef (_first q) (Just someY)
                     writeIORef (_next s) Nothing
                 _ -> do
                     !mfirst <- readIORef (_first q)
                     case mfirst of
-                        Just someFirst@(SomeSleeper first) ->
-                            when (first `eqSleeper` s) $
+                        Just someFirst@(SomeSuspend first) ->
+                            when (first `eqSuspend` s) $
                             do writeIORef (_first q) Nothing
                                writeIORef (_last q) Nothing
                         _ -> return ()
@@ -744,15 +744,15 @@ dequeueSleeper !q someS@(SomeSleeper s) = do
 --------------------------------------------------------------------------------
 -- misc. debug utils
 waitqToList
-    :: WaitQ -> IO [SomeSleeper]
+    :: SuspQ -> IO [SomeSuspend]
 waitqToList q = do
     !ms <- readIORef (_first q)
     case ms of
         Just s -> sleeperChain s
         _ -> return []
 
-sleeperChain :: SomeSleeper -> IO [SomeSleeper]
-sleeperChain someS@(SomeSleeper s) = do
+sleeperChain :: SomeSuspend -> IO [SomeSuspend]
+sleeperChain someS@(SomeSuspend s) = do
     !mnext <- readIORef (_next s)
     case mnext of
         Just next -> do
@@ -760,14 +760,14 @@ sleeperChain someS@(SomeSleeper s) = do
             return (someS : ss)
         _ -> return [someS]
 
-printWaitQ :: WaitQ -> IO ()
-printWaitQ q = do
+printSuspQ :: SuspQ -> IO ()
+printSuspQ q = do
     ss <- waitqToList q
     let !chain =
             intercalate
                 "->"
                 (map
-                     (\(SomeSleeper s) ->
+                     (\(SomeSuspend s) ->
                            "(SID: " ++ show (_sid s) ++ ", CID: " ++ show (_id (_chan s)) ++ ")")
                      ss)
     putStrLn $ "WAITQ: " ++ chain
