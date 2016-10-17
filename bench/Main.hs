@@ -3,7 +3,7 @@
 module Main where
 
 import           Control.Concurrent             hiding (Chan)
-import           Control.Concurrent.GChan
+import           Control.Concurrent.GoChan
 import           Control.Monad
 import           Criterion.Main
 import           System.Random

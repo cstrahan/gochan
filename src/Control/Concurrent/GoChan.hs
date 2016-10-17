@@ -8,7 +8,7 @@
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeFamilies              #-}
 
-module Control.Concurrent.GChan where
+module Control.Concurrent.GoChan where
 
 import           Control.Concurrent.MVar
 import           Control.Monad
