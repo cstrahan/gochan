@@ -530,7 +530,7 @@ chanClose !chan = do
         ms <- dequeue (_sendq chan)
         case ms of
             Nothing -> return ss
-            Just s -> releaseReaders (s : ss) chan
+            Just s -> releaseWriters (s : ss) chan
     wakeSuspends ss =
         forM_
             ss
