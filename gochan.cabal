@@ -32,7 +32,7 @@ library
     exposed-modules:
         Control.Concurrent.GoChan
     build-depends:
-        base >=4 && <5,
+        base >=4.8 && <5,
         array -any,
         random -any,
         vector -any,
