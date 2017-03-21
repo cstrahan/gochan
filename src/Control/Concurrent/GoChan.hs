@@ -17,9 +17,9 @@ module Control.Concurrent.GoChan
   ,chanMake
   ,chanClose
   ,chanRecv
-  ,chanRecvAsync
+  ,chanTryRecv
   ,chanSend
-  ,chanSendAsync
+  ,chanTrySend
   ,chanSelect)
   where
 
@@ -75,20 +75,21 @@ data Suspend a = forall b. Suspend
     , _sid        :: !Word64
     }
 
--- | The `Result` record represents the result of waiting to  on a 'Chan'nel;
--- either a 'Msg' was received, or the 'Chan'nel was 'Closed'.
+-- | The `Result` record represents the result of waiting to recieve a message
+-- on a given channel.
 data Result a
     = Msg a
     | Closed
 
--- | When used with 'chanSelect`, 'Case's provide a means of waiting for a
--- 'Send' or 'Recv' to complete on their respective 'Chan'nels.
+-- | When used with 'chanSelect`, a @'Case' α@ provides a means of waiting for a
+-- 'Send' or 'Recv' to complete on a given channel, subsequently invoking the
+-- given callback.
 --
--- ['Recv' chan act] Wait to receive value on @chan@, invoking @act result@
--- when selected.
+-- [@'Recv' (chan :: 'Chan' β) (act :: Result β -> IO α)@] Wait to receive a
+-- @msg@ on @chan@, invoking @act result@ when selected.
 --
--- ['Send' chan val act] Wait to send @val@ on @chan@, invoking @act@ when
--- selected.
+-- [@'Send' (chan :: 'Chan' β) (msg :: β) (act :: IO α)@] Wait to send @msg@ on
+-- @chan@, invoking @act@ when selected.
 data Case a
     = forall b. Recv (Chan b)
                      (Result b -> IO a)
@@ -131,12 +132,12 @@ shuffleVector !xs = do
 -- If given a default action, and no cases can run, immediately executes the
 -- default action.
 chanSelect
-    :: [Case a]     -- ^ The list of 'Case's.
+    :: [Case a]     -- ^ The list of cases.
     -> Maybe (IO a) -- ^ When 'Nothing', wait synchronously to select a
                     -- case; when @'Just' act@, run @act@ as a default
                     -- instead of blocking.
     -> IO a         -- ^ The value resulting from the selected 'Case'
-                    -- (or default action).
+                    -- (or default action, if given).
 chanSelect cases mdefault = do
     -- randomize the poll order to enforce fairness.
     !pollOrder <-
@@ -383,7 +384,7 @@ selUnlock !vec = do
                 when (caseChanId cas /= prevId) $ do (unlockCase cas)
                 go (n - 1) (caseChanId cas)
 
--- | Make a 'Chan'nel with the given buffer size.
+-- | Make a channel with the given buffer size.
 chanMake
     :: Int -> IO (Chan a)
 chanMake !size = do
@@ -416,17 +417,25 @@ chanMake !size = do
         , _id = id
         }
 
--- | Wait to successfully send a value on a 'Chan'nel.
+-- | Wait to successfully send a message on a channel.
+--
+-- Throws an exception when sending on a closed channel.
 chanSend
     :: Chan a -> a -> IO ()
 chanSend !chan !val = void $ chanSendInternal chan val True
 
--- | Attempt to send a value on a 'Chan'nel. Returns 'True' when successfull,
--- 'False' otherwise.
-chanSendAsync
+-- | Attempt to send a message on a channel. The message will be sent iff the
+-- channel has spare space in its buffer or another thread is waiting to recieve
+-- a message on this channel.
+--
+-- Returns 'True' iff the message was sent.
+--
+-- Throws an exception when sending on a closed channel.
+chanTrySend
     :: Chan a -> a -> IO Bool
-chanSendAsync !chan !val = chanSendInternal chan val False
+chanTrySend !chan !val = chanSendInternal chan val False
 
+-- returns True if a message was sent; otherwise returns False
 chanSendInternal :: Chan a -> a -> Bool -> IO Bool
 chanSendInternal !chan !val !block = do
     !isClosed <- readIORef (_closed chan)
@@ -497,7 +506,7 @@ send !chan !s !val !unlock = do
     unlock
     putMVar (_park s) (Just s) -- unpark
 
--- | Close a 'Chan'nel.
+-- | Close a channel.
 chanClose
     :: Chan a -> IO ()
 chanClose !chan = do
@@ -528,28 +537,37 @@ chanClose !chan = do
             (\(SomeSuspend s) ->
                   putMVar (_park s) Nothing)
 
--- | Attempt to receive a value on a 'Chan'nel.
-chanRecvAsync
+-- data type used internally to represent the result of waiting on a channel
+data RecvResult
+    = RecvWouldBlock
+    | RecvGotMessage
+    | RecvClosed
+
+-- | Attempt to receive a message on a channel. A message will be recieved iff
+-- the channel has a message in its buffer or another thread is waiting to
+-- send a message on this channel.
+chanTryRecv
     :: Chan a -> IO (Maybe (Result a))
-chanRecvAsync !chan = do
+chanTryRecv !chan = do
     ref <- newIORef undefined
     chanRecvInternal chan (Just ref) False >>=
         \case
-            (False,_) -> return Nothing
-            (True,False) -> return (Just Closed)
-            (True,True) -> Just <$> Msg <$> readIORef ref
+            RecvWouldBlock -> return Nothing
+            RecvClosed -> return (Just Closed)
+            RecvGotMessage-> Just <$> Msg <$> readIORef ref
 
--- | Wait to receive a value on a 'Chan'nel.
+-- | Wait to receive a message on a channel.
 chanRecv
     :: Chan a -> IO (Result a)
 chanRecv !chan = do
     ref <- newIORef undefined
     chanRecvInternal chan (Just ref) True >>=
         \case
-            (_,False) -> return Closed
-            (_,True) -> Msg <$> readIORef ref
+            RecvWouldBlock -> fail "the impossible happened"
+            RecvClosed -> return Closed
+            RecvGotMessage -> Msg <$> readIORef ref
 
-chanRecvInternal :: Chan a -> Maybe (IORef a) -> Bool -> IO (Bool, Bool)
+chanRecvInternal :: Chan a -> Maybe (IORef a) -> Bool -> IO RecvResult
 chanRecvInternal !chan !melemRef !block = do
     -- Fast path: check for failed non-blocking operation without acquiring the lock.
     -- WARNING: the order of these reads is important.
@@ -557,7 +575,7 @@ chanRecvInternal !chan !melemRef !block = do
     !qcount <- atomicReadIORef (_qcount chan)
     !isClosed <- atomicReadIORef (_closed chan)
     if not block && ((_qsize chan == 0 && isNothing sendq_first) || (_qsize chan > 0 && qcount == _qsize chan)) && not isClosed
-        then return (False, False)
+        then return RecvWouldBlock
         else do
             takeMVar (_lock chan)
             !isClosed <- readIORef (_closed chan)
@@ -565,13 +583,13 @@ chanRecvInternal !chan !melemRef !block = do
             if isClosed && qcount == 0
                 then do
                     putMVar (_lock chan) ()
-                    return (True, False)
+                    return RecvClosed
                 else do
                     ms <- dequeue (_sendq chan)
                     case ms of
                         Just (SomeSuspend s) -> do
                             recv chan (unsafeCoerceSuspend s) melemRef (putMVar (_lock chan) ())
-                            return (True, True)
+                            return RecvGotMessage
                         _ ->
                             if qcount > 0
                                 then do
@@ -588,11 +606,11 @@ chanRecvInternal !chan !melemRef !block = do
                                     writeIORef (_recvx chan) $! recvx'
                                     modifyIORef' (_qcount chan) (subtract 1)
                                     putMVar (_lock chan) ()
-                                    return (True, True)
+                                    return RecvGotMessage
                                 else if not block
                                          then do
                                              putMVar (_lock chan) ()
-                                             return (False, False)
+                                             return RecvWouldBlock
                                          else do
                                              next <- newIORef Nothing
                                              prev <- newIORef Nothing
@@ -606,7 +624,9 @@ chanRecvInternal !chan !melemRef !block = do
                                              enqueue (_recvq chan) s
                                              putMVar (_lock chan) ()
                                              ms' <- takeMVar park -- park
-                                             return (True, isJust ms')
+                                             if isJust ms'
+                                                then return RecvGotMessage
+                                                else return RecvClosed
 
 recv :: Chan a -> Suspend a -> Maybe (IORef a) -> IO () -> IO ()
 recv !chan !s !melemRef !unlock = do

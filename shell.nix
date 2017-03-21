@@ -2,7 +2,6 @@ let
   pkgs = import <nixpkgs> { };
 
   ghcPackages = pkgs.haskellPackages.ghcWithHoogle (p: with p; [
-    ghc-gc-tune
     cabal-install
     hindent
     ghc-mod
@@ -20,6 +19,7 @@ let
     hspec
     criterion
     weigh
+    ghc-gc-tune
   ]);
 
 in

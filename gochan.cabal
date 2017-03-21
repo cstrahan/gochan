@@ -5,14 +5,22 @@ build-type: Simple
 license: MIT
 license-file: LICENSE
 copyright: Copyright (C) 2016 Charles Strahan
-maintainer: charles@cstrahan.com
+maintainer: Charles Strahan <charles@cstrahan.com>
 homepage: http://github.com/cstrahan/gochan
 bug-reports: http://github.com/cstrahan/gochan/issues
 synopsis: Go-style channels
 description: This library provides bounded channels similar to those popularized
              by the Go programming language.
+             .
+             THIS LIBRARY IS STILL ALPHA AND SUBJECT TO CHANGE.
+             .
+             Breaking changes during the 0.0.X series won't result in a major
+             version bump (I hope to release a stable 1.0.0 soon).
+             .
+             Please give gochan a try and file an issue or pull request if you
+             discover any ways to improve this library.
 category: Concurrency
-author: Charles Strahan
+author: Charles Strahan <charles@cstrahan.com>
 extra-source-files:
     .gitignore
 
@@ -34,15 +42,6 @@ library
     default-language: Haskell2010
     hs-source-dirs: src
     ghc-options: -O2
-
-executable demo
-    main-is: Main.hs
-    build-depends:
-        base >=4 && <5,
-        gochan -any
-    default-language: Haskell98
-    hs-source-dirs: demo
-    ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2
 
 executable bench
     main-is: Main.hs
